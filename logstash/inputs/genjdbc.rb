@@ -36,6 +36,7 @@ class LogStash::Inputs::Genjdbc < LogStash::Inputs::Base
   config :jdbcSQLQuery, :validate  => :string, :required => true
   config :jdbcURL, :validate  => :string, :required => false
   config :jdbcTimeField, :validate => :string, :required => false
+  config :jdbcIdField, :validate => :string, :required => false
   config :jdbcPollInterval, :validate => :string, :required => false
   config :jdbcCollectionStartTime, :validate => :string, :required => false
   config :jdbcPStoreFile, :validate => :string, :required => false, :default => "genjdbc.pstore"
@@ -120,6 +121,8 @@ class LogStash::Inputs::Genjdbc < LogStash::Inputs::Base
     
     # Set a start time
     lastEvent = store.transaction { store.fetch(:lastEvent,DateTime.now) }
+    lastId = store.transaction { store.fetch(:lastId,0) }
+
     # If set, make an override from the config..
     if !@jdbcCollectionStartTime.nil?
       lastEvent = DateTime.parse @jdbcCollectionStartTime
@@ -140,15 +143,22 @@ class LogStash::Inputs::Genjdbc < LogStash::Inputs::Base
     while true
       
       # Debug : puts "lastEvent : "+lastEvent.to_s
-      jdbclastEvent = lastEvent.strftime("%Y-%m-%d %H:%M:%S.%L")
+      jdbclastEvent = lastEvent.strftime("%Y-%m-%d %H:%M:%S")
       currentTime = jdbclastEvent
       
       stmt = conn.create_statement
+
+      if originalQuery.include? "%{CURRENTID}"
+        @logger.debug( "setting last id")
+        originalQuery = originalQuery.gsub("%{CURRENTID}",lastId.to_s)
+        @logger.debug( "setting last id", :query => "#{originalQuery}")
+      end
 
       # If query explicity refers to CURRENTTIME, then use that directly
       if originalQuery.include? "%{CURRENTTIME}"
         escapedQuery = originalQuery.gsub("%{CURRENTTIME}",currentTime)
       else
+
       # if not, we'll implicity assemble query
       # Suggest removing this option completely and making it explicity
       # Escape sql query provided from config file
@@ -197,9 +207,22 @@ class LogStash::Inputs::Genjdbc < LogStash::Inputs::Base
             # debug: puts "Date Parsed is : "+eventTime.to_s
             if eventTime > lastEvent
               lastEvent = eventTime
-              store.transaction do store[:lastEvent] = lastEvent end
+              store.transaction do
+                store[:lastEvent] = lastEvent
+              end
             end
           end
+
+          if columnName == @jdbcIdField
+            # debug: puts "Id Column is : "+columnName
+            if value.to_i > lastId.to_i
+              lastId = value
+              store.transaction do
+                store[:lastId] = lastId
+              end
+            end
+          end
+
           
         end # for
 
