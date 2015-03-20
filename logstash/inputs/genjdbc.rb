@@ -182,7 +182,10 @@ class LogStash::Inputs::Genjdbc < LogStash::Inputs::Base
       rsmd = rs.getMetaData();
       columnCount = rsmd.getColumnCount()
 
+      rowcount = 0
+
       while (rs.next) do
+        rowcount = rowcount + 1
         event = LogStash::Event.new()
         event["jdbchost"] = @jdbcHost
 
@@ -225,13 +228,12 @@ class LogStash::Inputs::Genjdbc < LogStash::Inputs::Base
 
           
         end # for
-
         # Todo, check how many rows collected .. rowcount++
         decorate(event)
         queue << event
 
       end
-
+      @logger.info("Found rows from the Database:", :rowcount=> rowcount)
       rs.close
       stmt.close
       
