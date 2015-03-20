@@ -201,8 +201,15 @@ class LogStash::Inputs::Genjdbc < LogStash::Inputs::Base
             #substitute "" for <nil> returned by DB
             value = ""
           end
-          event[columnName] = value
-          
+          event[columnName.downcase] = value
+
+          if columnName == "TIME"
+            cal = java.util.Calendar.getInstance();
+            cal.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+            event.timestamp= Time.at(rs.getTimestamp(columnName, cal).getTime()/1000).utc
+            @logger.info("setting timestmp", :ts => event.timestamp)
+          end
+
           # Check the column to set the latest time field
           if columnName == @jdbcTimeField
             # debug: puts "Time Column is : "+columnName
@@ -220,6 +227,8 @@ class LogStash::Inputs::Genjdbc < LogStash::Inputs::Base
             # debug: puts "Id Column is : "+columnName
             if value.to_i > lastId.to_i
               lastId = value
+              @logger.info("Storing last read value", :last_id => lastId)
+              
               store.transaction do
                 store[:lastId] = lastId
               end
@@ -228,6 +237,7 @@ class LogStash::Inputs::Genjdbc < LogStash::Inputs::Base
 
           
         end # for
+
         # Todo, check how many rows collected .. rowcount++
         decorate(event)
         queue << event
