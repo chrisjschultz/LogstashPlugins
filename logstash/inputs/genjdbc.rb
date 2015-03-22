@@ -36,10 +36,13 @@ class LogStash::Inputs::Genjdbc < LogStash::Inputs::Base
   config :jdbcSQLQuery, :validate  => :string, :required => true
   config :jdbcURL, :validate  => :string, :required => false
   config :jdbcTimeField, :validate => :string, :required => false
+  config :jdbcTimeBindNumber, :validate => :number, :required => false
   config :jdbcIdField, :validate => :string, :required => false
+  config :jdbcIdBindNumber, :validate => :number, :required => false
   config :jdbcPollInterval, :validate => :string, :required => false
   config :jdbcCollectionStartTime, :validate => :string, :required => false
   config :jdbcPStoreFile, :validate => :string, :required => false, :default => "genjdbc.pstore"
+  
 
   # The 'read' timeout in seconds. If a particular connection is idle for
   # more than this timeout period, we will assume it is dead and close it.
@@ -120,9 +123,14 @@ class LogStash::Inputs::Genjdbc < LogStash::Inputs::Base
     store = PStore.new(@jdbcPStoreFile)
     
     # Set a start time
-    lastEvent = store.transaction { store.fetch(:lastEvent,DateTime.now) }
-    lastId = store.transaction { store.fetch(:lastId,0) }
-
+    lastEvent = java.sql.Timestamp.new(System.currentTimeMillis);
+    lastId = 0
+    store.transaction { 
+      lastEvent = store.fetch(:lastEvent, java.sql.Timestamp.new(System.currentTimeMillis)) 
+      lastId = store.fetch(:lastId, 0) 
+    }
+    @logger.info("Got stored data", :lastEvent => "#{lastEvent}", :lastId => "#{lastId}")
+    
     # If set, make an override from the config..
     if !@jdbcCollectionStartTime.nil?
       lastEvent = DateTime.parse @jdbcCollectionStartTime
@@ -135,49 +143,63 @@ class LogStash::Inputs::Genjdbc < LogStash::Inputs::Base
       queryFile = File.open(queryFilename,"rb")
       originalQuery = queryFile.read
       queryFile.close
+      originalQuery = originalQuery.gsub("\n"," ")
     else
       originalQuery = @jdbcSQLQuery
     end
-  
+    @logger.info("Parsed SQL", :originalQuery => "#{originalQuery}")
+    stmt = conn.prepareStatement(originalQuery)
+    @logger.info("Statement Prepared")
+    
+    cal = java.util.Calendar.getInstance();
+    cal.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
     # Main Loop
     while true
       
-      # Debug : puts "lastEvent : "+lastEvent.to_s
-      jdbclastEvent = lastEvent.strftime("%Y-%m-%d %H:%M:%S")
-      currentTime = jdbclastEvent
+#      # Debug : puts "lastEvent : "+lastEvent.to_s
+#      jdbclastEvent = lastEvent.strftime("%Y-%m-%d %H:%M:%S")
+#      currentTime = jdbclastEvent
       
-      stmt = conn.create_statement
+#      stmt = conn.create_statement
 
-      if originalQuery.include? "%{CURRENTID}"
-        @logger.debug( "setting last id")
-        originalQuery = originalQuery.gsub("%{CURRENTID}",lastId.to_s)
-        @logger.debug( "setting last id", :query => "#{originalQuery}")
-      end
-
-      # If query explicity refers to CURRENTTIME, then use that directly
-      if originalQuery.include? "%{CURRENTTIME}"
-        escapedQuery = originalQuery.gsub("%{CURRENTTIME}",currentTime)
-      else
-
-      # if not, we'll implicity assemble query
-      # Suggest removing this option completely and making it explicity
-      # Escape sql query provided from config file
-        begin
-          if originalQuery.include? " where " then
-            escapedQuery = originalQuery + " and "+@jdbcTimeField+" > '" + jdbclastEvent + "'" + " order by " +@jdbcTimeField
-          else
-            escapedQuery = originalQuery + " where "+@jdbcTimeField+" > '" + jdbclastEvent + "'" +  " order by " +@jdbcTimeField
-          end
-        end
-      end
-
-
-      escapedQuery = escapedQuery.gsub(/\\\"/,"\"")
-
-      @logger.info("Running Query : ", :query => "#{escapedQuery}")
+#      escapedQuery = originalQuery
+#
+#      if escapedQuery.include? "%{CURRENTID}"
+#        @logger.debug( "setting last id")
+#        escapedQuery = escapedQuery.gsub("%{CURRENTID}",lastId.to_s)
+#        @logger.debug( "setting last id", :query => "#{originalQuery}")
+#      end
+#
+#      # If query explicity refers to CURRENTTIME, then use that directly
+#      if escapedQuery.include? "%{CURRENTTIME}"
+#        escapedQuery = escapedQuery.gsub("%{CURRENTTIME}",currentTime)
+#      else
+#
+#      # if not, we'll implicity assemble query
+#      # Suggest removing this option completely and making it explicity
+#      # Escape sql query provided from config file
+#        begin
+#          if originalQuery.include? " where " then
+#            escapedQuery = originalQuery + " and "+@jdbcTimeField+" > '" + jdbclastEvent + "'" + " order by " +@jdbcTimeField
+#          else
+#            escapedQuery = originalQuery + " where "+@jdbcTimeField+" > '" + jdbclastEvent + "'" +  " order by " +@jdbcTimeField
+#          end
+#        end
+#      end
+#
+#
+#      escapedQuery = escapedQuery.gsub(/\\\"/,"\"")
+#
+#      @logger.info("Running Query : ", :query => "#{escapedQuery}")
     
+      @logger.info("Binding", :num => "#{@jdbcIdBindNumber.to_i}", :lastId => "#{lastId.to_i}")
+      @logger.info("Binding", :num => "#{@jdbcTimeBindNumber.to_i}", :lastEvent => "#{lastEvent}")
+      stmt.setLong(@jdbcIdBindNumber.to_i, lastId.to_i)
+      stmt.setTimestamp(@jdbcTimeBindNumber, lastEvent, cal)
+      @logger.info("Variables bound")
+      
       # Execute Query Statement
-      rs = stmt.executeQuery(escapedQuery)
+      rs = stmt.executeQuery()
 
       rsmd = rs.getMetaData();
       columnCount = rsmd.getColumnCount()
@@ -201,20 +223,16 @@ class LogStash::Inputs::Genjdbc < LogStash::Inputs::Base
             #substitute "" for <nil> returned by DB
             value = ""
           end
-          event[columnName.downcase] = value
-
-          if columnName == "TIME"
-            cal = java.util.Calendar.getInstance();
-            cal.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
-            event.timestamp= Time.at(rs.getTimestamp(columnName, cal).getTime()/1000).utc
-            @logger.info("setting timestmp", :ts => event.timestamp)
-          end
+          event[columnName.downcase] = value  
 
           # Check the column to set the latest time field
           if columnName == @jdbcTimeField
             # debug: puts "Time Column is : "+columnName
-            eventTime = DateTime.parse value
-            # debug: puts "Date Parsed is : "+eventTime.to_s
+            
+            eventTime = rs.getTimestamp(columnName, cal)
+            @logger.info("Using the following event time: ", :eventDate => "#{eventTime}")
+            event.timestamp= Time.at(eventTime.getTime()/1000).utc
+
             if eventTime > lastEvent
               lastEvent = eventTime
               store.transaction do
@@ -222,13 +240,12 @@ class LogStash::Inputs::Genjdbc < LogStash::Inputs::Base
               end
             end
           end
-
+          
           if columnName == @jdbcIdField
             # debug: puts "Id Column is : "+columnName
             if value.to_i > lastId.to_i
               lastId = value
               @logger.info("Storing last read value", :last_id => lastId)
-              
               store.transaction do
                 store[:lastId] = lastId
               end
@@ -245,7 +262,7 @@ class LogStash::Inputs::Genjdbc < LogStash::Inputs::Base
       end
       @logger.info("Found rows from the Database:", :rowcount=> rowcount)
       rs.close
-      stmt.close
+      
       
       # Now need to sleep for interval
       @logger.info("Sleeping for ", :interval_seconds => "#{@jdbcPollInterval.to_i}")
@@ -259,6 +276,7 @@ class LogStash::Inputs::Genjdbc < LogStash::Inputs::Base
   ensure
     # Close the JDBC connection
     @logger.info("Closing Connection to JDBC URL", :address => "#{@jdbcURL}")
+    stmt.close
     conn.close() rescue nil
   end # def run
   
