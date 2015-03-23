@@ -1,11 +1,13 @@
-# Genjdbc v0.1
-# Date 06 February 2015 09:00:00 GMT
+# Genjdbc v0.2
+# Date 2 March2015 09:00:00 GMT
 # Logstash Generic JDBC Input PlugIn
-# Authors: Stuart Tuck & Rob McKeown
+# Authors: Stuart Tuck & Rob McKeown & Chris Schultz
 #
 # This is a community contributed content pack and no explicit support, guarantee or warranties
 # are provided by IBM nor the contributor. Feel free to engage the community on the ITOAdev
 # forum if you need help!
+# Modified to make use of Prepared Statements, java.sql.Timestamps, Bind variables,
+# multiline SQL statements, @timestamp from the source table and lower case of column names (to auto-match common fields) by Chris Schultz.
 #
 # encoding: utf-8
 require "logstash/inputs/base"
@@ -40,6 +42,8 @@ class LogStash::Inputs::Genjdbc < LogStash::Inputs::Base
   config :jdbcIdField, :validate => :string, :required => false
   config :jdbcIdBindNumber, :validate => :number, :required => false
   config :jdbcPollInterval, :validate => :string, :required => false
+  #The following is broken in my version - Another option is to pass
+  #on onInit SQL statement for backfilling
   config :jdbcCollectionStartTime, :validate => :string, :required => false
   config :jdbcPStoreFile, :validate => :string, :required => false, :default => "genjdbc.pstore"
   
@@ -123,7 +127,7 @@ class LogStash::Inputs::Genjdbc < LogStash::Inputs::Base
     store = PStore.new(@jdbcPStoreFile)
     
     # Set a start time
-    lastEvent = java.sql.Timestamp.new(System.currentTimeMillis);
+    lastEvent = nil
     lastId = 0
     store.transaction { 
       lastEvent = store.fetch(:lastEvent, java.sql.Timestamp.new(System.currentTimeMillis)) 
@@ -132,6 +136,7 @@ class LogStash::Inputs::Genjdbc < LogStash::Inputs::Base
     @logger.info("Got stored data", :lastEvent => "#{lastEvent}", :lastId => "#{lastId}")
     
     # If set, make an override from the config..
+    #TODO this needs to be fixed
     if !@jdbcCollectionStartTime.nil?
       lastEvent = DateTime.parse @jdbcCollectionStartTime
     end
@@ -155,48 +160,12 @@ class LogStash::Inputs::Genjdbc < LogStash::Inputs::Base
     cal.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
     # Main Loop
     while true
-      
-#      # Debug : puts "lastEvent : "+lastEvent.to_s
-#      jdbclastEvent = lastEvent.strftime("%Y-%m-%d %H:%M:%S")
-#      currentTime = jdbclastEvent
-      
-#      stmt = conn.create_statement
-
-#      escapedQuery = originalQuery
-#
-#      if escapedQuery.include? "%{CURRENTID}"
-#        @logger.debug( "setting last id")
-#        escapedQuery = escapedQuery.gsub("%{CURRENTID}",lastId.to_s)
-#        @logger.debug( "setting last id", :query => "#{originalQuery}")
-#      end
-#
-#      # If query explicity refers to CURRENTTIME, then use that directly
-#      if escapedQuery.include? "%{CURRENTTIME}"
-#        escapedQuery = escapedQuery.gsub("%{CURRENTTIME}",currentTime)
-#      else
-#
-#      # if not, we'll implicity assemble query
-#      # Suggest removing this option completely and making it explicity
-#      # Escape sql query provided from config file
-#        begin
-#          if originalQuery.include? " where " then
-#            escapedQuery = originalQuery + " and "+@jdbcTimeField+" > '" + jdbclastEvent + "'" + " order by " +@jdbcTimeField
-#          else
-#            escapedQuery = originalQuery + " where "+@jdbcTimeField+" > '" + jdbclastEvent + "'" +  " order by " +@jdbcTimeField
-#          end
-#        end
-#      end
-#
-#
-#      escapedQuery = escapedQuery.gsub(/\\\"/,"\"")
-#
-#      @logger.info("Running Query : ", :query => "#{escapedQuery}")
-    
-      @logger.info("Binding", :num => "#{@jdbcIdBindNumber.to_i}", :lastId => "#{lastId.to_i}")
-      @logger.info("Binding", :num => "#{@jdbcTimeBindNumber.to_i}", :lastEvent => "#{lastEvent}")
+        
+      @logger.debug("Binding", :num => "#{@jdbcIdBindNumber.to_i}", :lastId => "#{lastId.to_i}")
+      @logger.debug("Binding", :num => "#{@jdbcTimeBindNumber.to_i}", :lastEvent => "#{lastEvent}")
       stmt.setLong(@jdbcIdBindNumber.to_i, lastId.to_i)
       stmt.setTimestamp(@jdbcTimeBindNumber, lastEvent, cal)
-      @logger.info("Variables bound")
+      @logger.debug("Variables bound")
       
       # Execute Query Statement
       rs = stmt.executeQuery()
@@ -230,7 +199,7 @@ class LogStash::Inputs::Genjdbc < LogStash::Inputs::Base
             # debug: puts "Time Column is : "+columnName
             
             eventTime = rs.getTimestamp(columnName, cal)
-            @logger.info("Using the following event time: ", :eventDate => "#{eventTime}")
+            @logger.debug("Using the following event time: ", :eventDate => "#{eventTime}")
             event.timestamp= Time.at(eventTime.getTime()/1000).utc
 
             if eventTime > lastEvent
@@ -245,7 +214,7 @@ class LogStash::Inputs::Genjdbc < LogStash::Inputs::Base
             # debug: puts "Id Column is : "+columnName
             if value.to_i > lastId.to_i
               lastId = value
-              @logger.info("Storing last read value", :last_id => lastId)
+              @logger.debug("Storing last read value", :last_id => lastId)
               store.transaction do
                 store[:lastId] = lastId
               end
